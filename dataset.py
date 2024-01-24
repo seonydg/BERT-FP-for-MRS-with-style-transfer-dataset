@@ -4,6 +4,7 @@ from transformers import AutoTokenizer
 
 import csv
 import random
+import json
 
 # tokenizer
 tokenizer = AutoTokenizer.from_pretrained('klue/roberta-base')
@@ -212,3 +213,79 @@ class MyDataset(Dataset):
             batch_urc_labels += urc_labels
         
         return torch.tensor(batch_corrupt_tokens), torch.tensor(batch_output_tokens), batch_corrupt_mask_positions, torch.tensor(batch_urc_inputs), torch.tensor(batch_urc_labels), torch.tensor(batch_mlm_attentions), torch.tensor(batch_urc_attentions)
+    
+
+
+class FTDataset(Dataset):
+    def __init__(self, data_path):
+        self.tokenizer = AutoTokenizer.from_pretrained('klue/roberta-base')
+        special_tokens = {'sep_token':'<SEP>'}
+        self.tokenizer.add_special_tokens(special_tokens)
+
+        with open(data_path, 'r') as f:
+            self.session_dataset = json.load(f)
+    
+    def __len__(self):
+        return len(self.session_dataset)
+    
+    def __getitem__(self, idx):
+        session = self.session_dataset[str(idx)]
+
+        context = session['context']
+        positive_response = session['positive_response']
+        negative_responses = session['negative_response']
+        session_tokens = []
+        session_labels = []
+
+        # MRS
+        context_token = [self.tokenizer.cls_token_id]
+        for utt in context:
+            context_token + self.tokenizer.encode(utt, add_special_tokens=False)
+            context_token + [self.tokenizer.sep_token_id]
+
+        ## positive
+        pos_response_token = [self.tokenizer.eos_token_id]
+        pos_response_token += self.tokenizer.encode(positive_response, add_special_tokens=False)
+        positive_tokens = context_token + pos_response_token
+        session_tokens.append(positive_tokens)
+        session_labels.append(1)
+        ## negative
+        for negative_response in negative_responses:
+            neg_response_token = [self.tokenizer.eos_token_id]
+            neg_response_token += self.tokenizer.encode(negative_response, add_special_tokens=False)
+            negative_tokens = context_token + neg_response_token
+            session_tokens.append(negative_tokens)
+            session_labels.append(0)
+        
+        return session_tokens, session_labels
+    
+    def collate_fn(self, sessions):
+        '''
+            input:
+                data: [(session1), (session2), ... ]
+            return:
+                batch_input_tokens_pad: (B, L) padded
+                batch_labels: (B)
+        '''
+        # padding
+        max_input_len = 0
+        for session in sessions:
+            session_tokens, session_labels = session
+            input_tokens_len = [len(x) for x in session_tokens]
+            max_input_len = max(max_input_len, max(input_tokens_len))
+        
+        ## batch
+        batch_input_tokens, batch_input_labels = [], []
+        batch_input_attentions = []
+
+        for session in sessions:
+            session_tokens, session_labels = session
+
+            for session_token in session_tokens:
+                input_token = session_token + [self.tokenizer.pad_token_id for _ in range(max_input_len - len(session_token))]
+                input_attention = [1 for _ in range(len(session_token))] + [0 for _ in range(max_input_len - len(session_token))]
+                batch_input_tokens.append(input_token)
+                batch_input_attentions.append(input_attention)
+            batch_input_labels += session_labels
+        
+        return torch.tensor(batch_input_tokens), torch.tensor(batch_input_attentions), torch.tensor(batch_input_labels)
